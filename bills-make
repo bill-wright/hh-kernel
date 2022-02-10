@@ -1,0 +1,3 @@
+#!/bin/bash
+export CROSS_COMPILE_AARCH64_PATH=/usr
+./nvbuild.sh -o $(pwd)/kernel_out
