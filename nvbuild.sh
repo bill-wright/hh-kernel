@@ -83,7 +83,8 @@ function build_arm64_kernel_sources {
 
 	# shellcheck disable=SC2236
 	if [ ! -z "${KERNEL_OUT_DIR}" ] ; then
-		O_OPT=(-O "${KERNEL_OUT_DIR}")
+		#O_OPT=(-O "${KERNEL_OUT_DIR}")
+		O_OPT=("O=${KERNEL_OUT_DIR}")
 		tegra_kernel_out="${KERNEL_OUT_DIR}"
 	else
 		O_OPT=()
