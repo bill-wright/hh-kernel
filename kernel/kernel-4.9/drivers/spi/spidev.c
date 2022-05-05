@@ -36,7 +36,7 @@
 
 #include <linux/uaccess.h>
 
-
+#define VERBOSE
 /*
  * This supports access to SPI devices using normal userspace I/O calls.
  * Note that while traditional UNIX/POSIX I/O semantics are half duplex,

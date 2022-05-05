@@ -307,6 +307,7 @@ struct tegra_spi_data {
 	unsigned				max_buf_size;
 	bool					is_curr_dma_xfer;
 	bool					variable_length_transfer;
+	bool					aborted;
 
 	/* Slave Ready Polarity (true: Active High, false: Active Low) */
 	int					gpio_slave_ready;
@@ -366,6 +367,22 @@ static int tegra_spi_runtime_resume(struct device *dev);
 static int tegra_spi_validate_request(struct spi_device *spi,
 			struct tegra_spi_data *tspi, struct spi_transfer *t);
 static int tegra_spi_ext_clk_enable(bool enable, struct tegra_spi_data *tspi);
+static inline unsigned long tegra_spi_readl(struct tegra_spi_data *tspi,
+		unsigned long reg)
+{
+	return readl(tspi->base + reg);
+}
+
+static inline void tegra_spi_writel(struct tegra_spi_data *tspi,
+		unsigned long val, unsigned long reg)
+{
+	writel(val, tspi->base + reg);
+
+	/* TODO: remove the forced fence read below */
+	/* Read back register to make sure that register writes completed */
+	if (reg != SPI_TX_FIFO)
+		readl(tspi->base + SPI_COMMAND1);
+}
 
 #ifdef TEGRA_SPI_SLAVE_DEBUG
 static ssize_t force_unpacked_mode_set(struct device *dev,
@@ -392,6 +409,7 @@ static ssize_t force_unpacked_mode_show(struct device *dev,
 	struct spi_master *master = dev_get_drvdata(dev);
 	if (master) {
 		tspi = spi_master_get_devdata(master);
+		dev_dbg(tspi->dev, "force_unpacked_mode_show\n");
 		return sprintf(buf, "%d", tspi->force_unpacked_mode);
 	}
 	return -ENODEV;
@@ -401,22 +419,6 @@ static DEVICE_ATTR(force_unpacked_mode, 0644, force_unpacked_mode_show,
 						force_unpacked_mode_set);
 #endif
 
-static inline unsigned long tegra_spi_readl(struct tegra_spi_data *tspi,
-		unsigned long reg)
-{
-	return readl(tspi->base + reg);
-}
-
-static inline void tegra_spi_writel(struct tegra_spi_data *tspi,
-		unsigned long val, unsigned long reg)
-{
-	writel(val, tspi->base + reg);
-
-	/* TODO: remove the forced fence read below */
-	/* Read back register to make sure that register writes completed */
-	if (reg != SPI_TX_FIFO)
-		readl(tspi->base + SPI_COMMAND1);
-}
 
 static inline void tegra_spi_fence(struct tegra_spi_data *tspi)
 {
@@ -446,6 +448,7 @@ static void tegra_spi_clear_status(struct tegra_spi_data *tspi)
 {
 	unsigned long val;
 
+        dev_dbg(tspi->dev, "tegra_spi_clear_status\n");
 	/* Write 1 to clear status register */
 	val = tegra_spi_readl(tspi, SPI_TRANS_STATUS);
 	tegra_spi_writel(tspi, val, SPI_TRANS_STATUS);
@@ -475,6 +478,7 @@ static void tegra_spi_clear_status(struct tegra_spi_data *tspi)
 
 static void reset_controller(struct tegra_spi_data *tspi)
 {
+        dev_dbg(tspi->dev, "reset_controller\n");
 	if (!tspi->reset_ctrl_status)
 		return;
 
@@ -748,6 +752,7 @@ static int tegra_spi_start_tx_dma(struct tegra_spi_data *tspi, int len)
 
 static int tegra_spi_start_rx_dma(struct tegra_spi_data *tspi, int len)
 {
+        dev_dbg(tspi->dev, "start_rx_dma\n");
 	reinit_completion(&tspi->rx_dma_complete);
 	tspi->rx_dma_len = len;
 
@@ -849,6 +854,7 @@ static int tegra_spi_start_dma_based_transfer(
 	int maxburst = 0;
 	struct dma_slave_config dma_sconfig;
 
+	dev_dbg(tspi->dev, "Starting dma_based_transfer\n");
 	/* Make sure that Rx and Tx fifo are empty */
 	ret = check_and_clear_fifo(tspi);
 	if (ret != 0)
@@ -982,6 +988,7 @@ static int tegra_spi_start_cpu_based_transfer(
 	unsigned cur_words;
 	int ret;
 
+	dev_dbg(tspi->dev, "Starting cpu_based_transfer\n");
 	ret = check_and_clear_fifo(tspi);
 	if (ret != 0)
 		return ret;
@@ -1125,6 +1132,7 @@ static int tegra_spi_validate_request(struct spi_device *spi,
 	int req_mode;
 
 	req_mode = spi->mode & 0x3;
+	dev_dbg(tspi->dev, "validate_reqeust: mode=%d\n", req_mode);
 	if ((req_mode == SPI_MODE_0) || (req_mode == SPI_MODE_2)) {
 		if (t->tx_buf) {
 			/* Tx is not supported in mode 0 and mode 2 */
@@ -1257,6 +1265,7 @@ static int tegra_spi_start_transfer_one(struct spi_device *spi,
 	unsigned long command1;
 	int req_mode;
 
+	dev_dbg(tspi->dev, "Starting start_transfer_one\n");
 	bits_per_word = t->bits_per_word;
 	speed = t->speed_hz ? t->speed_hz : spi->max_speed_hz;
 	/* Set slave controller clk 1.5 times the bus frequency */
@@ -1353,8 +1362,8 @@ static int tegra_spi_start_transfer_one(struct spi_device *spi,
 	tegra_spi_writel(tspi, command1, SPI_COMMAND1);
 	tspi->command1_reg = command1;
 
-	dev_dbg(tspi->dev, "The def 0x%x and written 0x%lx\n",
-				tspi->def_command1_reg, command1);
+	dev_dbg(tspi->dev, "The def 0x%x and written 0x%lx words_to_transfer = %d\n",
+				tspi->def_command1_reg, command1, tspi->words_to_transfer);
 
 	if (total_fifo_words > SPI_FIFO_DEPTH)
 		ret = tegra_spi_start_dma_based_transfer(tspi, t);
@@ -1509,16 +1518,19 @@ static int tegra_spi_wait_on_message_xfer(struct tegra_spi_data *tspi)
 	/* wait for spi isr */
 	ret = wait_for_completion_interruptible_timeout(
 				&tspi->xfer_completion, timeout);
-	if (ret <= 0) {
+	if (ret <= 0 || tspi->aborted) {
 		/* interrupted-wait/late interrupt is considered spurious */
 		atomic_set(&tspi->isr_expected, 0);
 		if (ret == -ERESTARTSYS) {
 			flush_signals(current);
 			dev_warn(tspi->dev, "waiting for master was interrupted\n");
 		}
-		if (ret == 0)
+		if (tspi->aborted)
+			dev_info(tspi->dev, "Aborted waiting for master\n");
+		else if (ret == 0)
 			dev_info(tspi->dev, "Timeout waiting for master\n");
 		dump_regs(dbg, tspi, "spi-int-timeout [ret:%ld]", ret);
+		tspi->aborted = false;
 		if (tspi->is_curr_dma_xfer &&
 				(tspi->cur_direction & DATA_DIR_TX))
 			dmaengine_terminate_all(tspi->tx_dma_chan);
@@ -1531,6 +1543,7 @@ static int tegra_spi_wait_on_message_xfer(struct tegra_spi_data *tspi)
 		ret = -EIO;
 		return ret;
 	}
+        dev_dbg(tspi->dev, "Wait complete: direction: 0x%x status = 0x%x\n", tspi->cur_direction, tspi->status_reg);
 	/* interrupt came and status in tspi->status_reg */
 	if (tspi->cur_direction & DATA_DIR_TX)
 		tspi->tx_status = tspi->status_reg &
@@ -1556,11 +1569,11 @@ static int tegra_spi_wait_on_message_xfer(struct tegra_spi_data *tspi)
 		tspi->words_to_transfer !=
 			tspi->curr_xfer->len/tspi->bytes_per_word) {
 		dump_regs(err_ratelimited, tspi,
-				"transferred[%d] != requested[%d]",
+				"transferred[%d] != requested[%d] tx_status=0x%x rx_status=0x%x",
 				tspi->words_to_transfer,
-				tspi->curr_xfer->len/tspi->bytes_per_word);
-		tspi->tx_status = SPI_TX_FIFO_UNF;
-		tspi->rx_status = SPI_RX_FIFO_OVF;
+				tspi->curr_xfer->len/tspi->bytes_per_word, tspi->tx_status, tspi->rx_status);
+		//tspi->tx_status = SPI_TX_FIFO_UNF;
+		//tspi->rx_status = SPI_RX_FIFO_OVF;
 	}
 
 	/* cs inactive intr while it is masked, mark as error */
@@ -1742,6 +1755,8 @@ static int tegra_spi_transfer_one_message(struct spi_master *master,
 	struct spi_device *spi = msg->spi;
 	int ret;
 
+        dev_dbg(tspi->dev, "Transfer one message\n");
+
 	msg->status = 0;
 	msg->actual_length = 0;
 
@@ -1855,12 +1870,22 @@ static irqreturn_t tegra_spi_isr(int irq, void *context_data)
 	tegra_spi_slave_busy(tspi);
 
 	/* Inform client about controller interrupt. */
+	dev_dbg(tspi->dev, "slave_isr_callback = %p\n", tspi->spi_slave_isr_callback);
 	if (tspi->spi_slave_isr_callback)
 		tspi->spi_slave_isr_callback(tspi->client_data);
 
 	complete(&tspi->xfer_completion);
 	return IRQ_HANDLED;
 }
+
+int tegra124_spi_slave_abort(struct spi_master *master) {
+	struct tegra_spi_data *tspi = spi_master_get_devdata(master);
+	dev_dbg(tspi->dev, "forcing SPI slave completion \n");
+	tspi->aborted = true;
+	complete(&tspi->xfer_completion);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tegra124_spi_slave_abort);
 
 static struct tegra_spi_platform_data *tegra_spi_parse_dt(
 		struct platform_device *pdev)

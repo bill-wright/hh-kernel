@@ -450,6 +450,15 @@ static void tegra_dma_start(struct tegra_dma_channel *tdc,
 		struct tegra_dma_sg_req *sg_req)
 {
 	struct tegra_dma_channel_regs *ch_regs = &sg_req->ch_regs;
+	dev_dbg(tdc2dev(tdc), "%s():start: csr: 0x%lx apb_seq: 0x%lx apb_ptr 0x%lx ahb_seq: 0x%lx ahb_ptr: 0x%lx support_wcount: 0x%x wcount 0x%lx\n", __func__,
+			ch_regs->csr,
+			ch_regs->apb_seq,
+			ch_regs->apb_ptr,
+			ch_regs->ahb_seq,
+			ch_regs->ahb_ptr,
+	                tdc->tdma->chip_data->support_separate_wcount_reg,
+			ch_regs->wcount
+			);
 
 	tdc_write(tdc, TEGRA_APBDMA_CHAN_CSR, ch_regs->csr);
 	tdc_write(tdc, TEGRA_APBDMA_CHAN_APBSEQ, ch_regs->apb_seq);
@@ -926,12 +935,14 @@ static int get_transfer_param(struct tegra_dma_channel *tdc,
 static void tegra_dma_prep_wcount(struct tegra_dma_channel *tdc,
 	struct tegra_dma_channel_regs *ch_regs, u32 len)
 {
-	u32 len_field = (len - 4) & 0xFFFC;
 
-	if (tdc->tdma->chip_data->support_separate_wcount_reg)
+	if (tdc->tdma->chip_data->support_separate_wcount_reg) {
+	        u32 len_field = (len - 4) & 0xFFFFFFFC;
 		ch_regs->wcount = len_field;
-	else
+	} else {
+	        u32 len_field = (len - 4) & 0xFFFC;
 		ch_regs->csr |= len_field;
+	}
 }
 
 static struct dma_async_tx_descriptor *tegra_dma_prep_slave_sg(
@@ -1289,7 +1300,7 @@ static const struct tegra_dma_chip_data tegra114_dma_chip_data = {
 static const struct tegra_dma_chip_data tegra148_dma_chip_data = {
 	.nr_channels		= 32,
 	.channel_reg_size	= 0x40,
-	.max_dma_count		= 1024UL * 64,
+	.max_dma_count		= 1024UL * 64 * 64,
 	.support_channel_pause	= true,
 	.support_separate_wcount_reg = true,
 };
